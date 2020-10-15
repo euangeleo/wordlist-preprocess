@@ -1,0 +1,329 @@
+#!/usr/bin/perl
+#
+# conversion
+#
+# Created 20080416 by E Jackson
+# This version last edited 20081215
+#
+# I want to transcribe word lists in Unicode IPA, using the SIL SCIM/KMFL
+#  keyboard and the Doulos SIL fonts (I'm stating this just in case this
+#  keyboard and font combination end up using non-Unicode symbols), but I
+#  want to analyze the data in the RuG/L04 dialectometry package, which
+#  can only read in ASCII text, like X-SAMPA IPA. So, this script is
+#  supposed to convert one to the other.
+#
+# I have also had problems getting the sssplit program (included in the
+#  RuG/L04 package) to work, so I'm trying to include the functionality
+#  of that program here, also.
+#
+# Usage is "conversion mapping_file word_list_file" Output is to a file
+#  that is hard-coded; right now, it gets written to a file with the same
+#  name as the word list file, with a different extension (.converted). I'm
+#  willing to change this.
+#
+# The format that the program expects the mapping file to be in is clear
+#  text with two columns of tab-separated data. I can't figure out how to
+#  get OpenOffice to spit the files out without the cell contents being
+#  enclosed in either single or double quotes, so this program assumes
+#  that the element in each column will also be surrounded by double
+#  quotes, which it needs to strip off. The element in the first column
+#  is a code point in hexadecimal (0x0000), and the element in the second
+#  column is the equivalent representation of that code point in X-SAMPA,
+#  as taken from the X-SAMPA Wikipedia entry. The file ought to look like:
+#
+#"Unicode codepoint to convert from"   "X-SAMPA representation"
+#
+#  and note that the X-SAMPA representation may include a double-quote as
+#  an actual character, so I can't just ignore all double quotes. The
+#  reading-in should tolerate whitespace anywhere in the file, even between
+#  the quotation marks and the (non-white-space) conversion elements.
+#
+# The program will go through the wordlist file and convert every codepoint to
+#  the corresponding sequence of characters found in the mapping file,
+#  leaving all whitespace unchanged. It also assumes that the first line is
+#  a list of labels (so it won't change those), and that the first column is
+#  the gloss for the word list item, so it won't change those, either. It
+#  then assumes that every actual wordlist item will be enclosed in double
+#  quotes, and separated by spaces. In some cases, multiple items will be
+#  enclosed in quotes and separated by a semicolon, which should not be changed
+#  (should not be changed for the input to sssplit, though the part of this
+#  program that replaces sssplit *does* need to get rid of the semicolons).
+#  I was having trouble with bad file names based on the glosses, so I've
+#  just started using item numbers in the "glosses" column.
+#
+# A late bug that I discovered (in the version from 20080521) was that when
+#  wordlist items were split into multiple files (replacing sssplit), the
+#  format was incorrect if multiple words were present at a single datapoint.
+#  This appears to be totally fixed in the current version.
+#
+# TO DO:
+#
+# -- add command line options, not just a list of args? (eg help, output file name,
+#    flags regarding the format of the word list file, a flag to leave any ascii
+#    character unchanged, a flag to do the job of sssplit or not)
+# -- be a little more flexible on the output file location and whether or not
+#    something's already there.
+
+package forl04;
+use utf8;
+use encoding 'utf8';
+use warnings;
+use strict;
+our (%map, @lines, $linepos, $charpos);
+$forl04::linepos = 0;
+$forl04::charpos = 0;
+
+print "Program: " . $0 . "\n\nRunning time is " . localtime() . ".\n";
+
+my $progname = $0;
+$progname =~ s!.*/!!;
+
+if ($#ARGV != 1) {
+    die <<"EOT";
+
+Usage: $progname mapping_file wordlist_file_in
+
+EOT
+}
+
+my $mapfile = shift;
+my $wordlist_in = shift;
+my $outfile = $wordlist_in . '.converted';
+# Right now, I assume this folder exists, and is empty; this should be made more
+#  flexible in future versions
+my $split_location = './temp/';
+
+# SUBROUTINES
+# 1. A routine to create a hash to be used for mapping by reading in the map file
+
+sub get_map {
+  my $file_to_open = shift;
+# Read in the mapfile line by line, and keep track of what line you're reading
+  open(MAPFILE, "<:utf8", $file_to_open) or die "\nOops! Could not open the map file: $!.\n";
+  my $line = 0;
+# Match two columns of things, both enclosed by double quotes -- and make
+#  sure that you pick the last double quote before the end of the line,
+#  but tolerate it if the end of the line doesn't come right away.
+  while (<MAPFILE>) {
+    $line++;
+    if (/^"\s*(\S+)\s*"\s+"\s*(\S+)\s*"\s*$/) {
+       $forl04::map{$1} = $2;
+    } else {
+       die "\nProblem reading line $line of $file_to_open: bad format?\n";
+    }
+  }
+  close(MAPFILE);
+  return;
+}
+
+# 2. A routine to take a word list item and map, and return the mapped item
+sub mapped {
+  my $mapme = shift;
+  my $mappedform; # The return value will get put here
+# What's in $mapme is an entire column, which may be padded with whitespace
+#  around and within double quotes. Whitespace and quotes get spit back out
+#  (unless we're doing the job of sssplit)
+## LATER REVISION: strip the quotes, since sssplit has trouble parsing when
+## we use double quotes as field delimiters and as phonetic symbols.
+  my @explodethisitem = unpack("(U)*", $mapme); # each array element is now a number in decimal representing a character
+  foreach (@explodethisitem) {
+    my $letter = chr($_);
+## OLD
+#    if ($letter =~ /\s|"/) {
+#       $mappedform .= chr($_);
+## NEW
+    if ($letter =~ /\s|"/) {
+       if ($letter =~ /\s/) {
+         $mappedform .= chr($_)
+       }
+## END NEW
+    } else {
+       my $thischarinhex = sprintf('%#06x', ord($letter));
+       if (defined $forl04::map{$thischarinhex}) {
+          $mappedform .= $forl04::map{$thischarinhex};
+       } else {
+          warn "\nEncountered $letter ($thischarinhex) at line " . $forl04::linepos ." , column " . $forl04::charpos . ", but there\'s no mapping for this character!\n";
+       }
+    }
+  }
+  return $mappedform;
+}
+
+# MAIN BODY
+# 1. Read in the conversion file, and make a hash to use in conversion. (call get_map)
+
+print "\nUsing $mapfile as the mapping file to modify the wordlist file $wordlist_in.\n";
+# WAS: my(%map) = get_map($mapfile);
+get_map($mapfile);
+
+### DEBUGGING CODE vv
+#my @tempkeys = keys %forl04::map;
+#print "\nHere is my map:\n";
+#foreach (sort @tempkeys) {
+#  print "$_\t" . $forl04::map{$_} . "\n";
+#}
+#print "\n";
+### DEBUGGING CODE ^^
+
+# 2. Read in the wordlist file. In this pass, keep track of any codepoints that don't have
+#  a mapping. If there are any, then print them without converting. Keep track of the
+#  wordlist file so that it can be converted later without reading it in again.
+
+open(INFILE, "<:utf8", $wordlist_in) or die "\nOops! Couldn't open the wordlist: $!.\n";
+my $linenum = 1;
+$forl04::lines[$linenum] = <INFILE>; # includes a \n; this holds the lines of the file; index is line number
+my $foundanorphan = '0'; # this is a flag
+my %orphanlines; # this tracks the line numbers for each orphan (stored as a string, like '7, 13, 45')
+while (<INFILE>) {
+  chomp;
+# possible bug if the last line just has a \n
+  my @thislinechars; # keeps all characters from this line as an array
+  $linenum++;
+  $forl04::lines[$linenum] = $_; # This array starts with index 2, but the index will always be the same as the real line number
+# Take off the word label at the beginning of the line.
+  my($label, $restofline) = /^(.+)\t(.+)$/ or die "\nHaving trouble reading the wordlist file: bad format?\n";
+# Go through this line of characters one at a time; for each non-blank char (excluding "), check that it's in the map
+  @thislinechars = unpack("(U)*", $restofline); # each array element is now a number in decimal representing a character
+  foreach (@thislinechars) {
+    my $asaletter = chr($_);
+    if ($asaletter =~ /\S/) {
+       next if ($asaletter =~ /"/);
+       my $inhex = sprintf('%#06x', ord($asaletter));
+       if (defined $forl04::map{$inhex}) {
+          next;
+       } else {
+         $foundanorphan++;
+# If an orphan, check if it's been found in this file before; if not, add it to %orphanlines
+         if (defined $orphanlines{$inhex}) {
+# If it's been found before, but not on this line, then add this line to $orphanlines{$inhex}
+#  (if it's been found on this line before, then this line number ought to be the last one in the element)
+           $orphanlines{$inhex} =~ /\s(\d+)$/;
+           my $lastline = $1;
+           if ($lastline = $linenum) {
+             $orphanlines{$inhex} .= ', ' . $linenum;
+           }
+         } else {
+           $orphanlines{$inhex}=$linenum;
+         }
+       }
+    }
+  }
+}
+
+close(INFILE);
+
+
+# 2.5 If characters were found in the file that were not in the mapping, then spit
+#       out a report of which characters were found, on which lines, and then end.
+if ($foundanorphan > 0) {
+  my @orphansinhex;
+  @orphansinhex = keys %orphanlines;
+  print "\n\nI found some characters in your wordlist file that have no mapping in your\n   mapping file.\n";
+  print "Here\'s what I found:\n";
+  foreach (sort @orphansinhex) {
+    print "Character " . chr(hex($_)) . " (Unicode codepoint " . $_ . ") was found on line(s) " . $orphanlines{$_} . ".\n" ;
+  }
+  die "\n\nNo conversion done.\nProgram stopped";
+}
+
+# Eventually, it would be nice to (1) check whether the output file already exists, and
+#  (2) give the user a chance to overwrite it, if it does. That's for later.
+open(OUTFILE, ">:utf8", $outfile) or die "\nProblem opening file for output $outfile: $!.\n";
+
+# 3. Read through the lines of the wordlist file, replacing every
+#    character (except the labels column) using the hash.
+# Will need to strip double quotes, and maybe whitespace.
+
+# file in @lines, each index is the right line number (so, starting from 1)
+print OUTFILE $forl04::lines[1];
+
+# There should be an initial blank column, which will go in array element [0]
+my @labels = split(/\t/, $forl04::lines[1]);
+chomp @labels;
+# So, the number of data points is $#labels
+# the number of lines that will be in there will be $linenum, eventually
+my @alldata; # This will be a two-index array, where the first index is the line number, second is column number
+foreach (0 .. $#labels) {
+  $alldata[1][$_] = $labels[$_];
+}
+# use $linenum as an upper limit
+for (2 .. $linenum) {
+  $forl04::linepos = $_;
+# assume that the file is tab-delimited (since it uses commas internal to wordlist items)
+  my @columns = split(/\t/, $forl04::lines[$_]);
+# The first column is the wordlist item, which doesn't get converted
+## OLD
+#  print OUTFILE shift(@columns);
+## NEW
+  my $temp = shift (@columns);
+  $temp =~ /"(.+)"/ or die "Problem with data file: weird item gloss on line $_ (empty, or has quotes?).\n";
+  $alldata[$forl04::linepos][0] = $1;
+  print OUTFILE $1;
+## END NEW
+  $forl04::charpos = 1;
+# Now start a loop over remaining elements in @columns of: print \t, print converted element
+  foreach (@columns) {
+     if (defined) {
+       if (/\S+/) {
+          $temp = mapped($_);
+       } else {
+          $temp = '';
+       }
+     } else {
+       $temp = '';
+     }
+     print OUTFILE "\t" . $temp;
+     chomp $temp;
+     $alldata[$forl04::linepos][$forl04::charpos] = $temp;
+     $forl04::charpos++;
+  }
+  print OUTFILE "\n";
+}
+close(OUTFILE);
+print "\nConversion complete.\n";
+
+# 4. Do the job of sssplit: break the wordlist file up into separate files by item, in the
+#    proper format, and create a labels file.
+print "\nStarting sssplit operation: creating files in $split_location.\n";
+
+# Right now, the input file is in @forl04::lines[1 .. n], but unconverted.
+# Need to split the first line into labels (so I moved that above -- remember @labels?),
+#   and write the labels file
+# Then need to split each row into a separate file.
+
+# Write the labels file
+my $thisfilename = $split_location . '_LABELS_.LBL';
+open(LABELFILE, ">:utf8", $thisfilename) or die "\nProblem opening file $thisfilename for output: $!.\n";
+# There should be an initial blank column, which will go in array element [0]
+foreach (1 .. $#labels) {
+  my $labelnumber = sprintf("%4s", $_);
+  print LABELFILE "$labelnumber\t$labels[$_]\n";
+}
+print "\nWrote $#labels labels to labels file.\n";
+close(LABELFILE);
+# now loop over word list items, creating a new file for each item; filename should
+#  be the item gloss.
+# Remember, each item is now converted, and occupies an element in the two-index array @alldata
+#  The first index goes over line numbers from 1 (which is the data point labels) to $linenum
+#  The second index goes over columns from 0 (the glosses) to $#labels
+my ($linnum, $colnum, $countfiles);
+$countfiles = 0;
+foreach $linnum (2 .. $linenum) {
+  $thisfilename = $split_location . $alldata[$linnum][0] . '.txt';
+  open(ITEMFILE, ">:utf8", $thisfilename) or die "\nProblem opening file \'$thisfilename\' for output: $!.\n";
+  $countfiles++;
+  foreach $colnum (1 .. $#labels) {
+# Each column's item in @alldata may have whitespace, but should not have double quotes anymore
+# OLD LINE
+#    if ($alldata[$linnum][$colnum] =~ /\S+/) {
+# NEW LINE
+    if (defined $alldata[$linnum][$colnum]) {
+      if ($alldata[$linnum][$colnum] =~ /\S+/) {
+# BUG FIX: If this column contains multiple wordlist items, then they need to be formatted on multiple lines
+       print ITEMFILE ": $labels[$colnum]\n- " . join("\n- ", split(/\s*;\s*/, $alldata[$linnum][$colnum])) . "\n";
+      }
+    }
+  }
+  close(ITEMFILE);
+}
+print "\nWrote $countfiles wordlist item file(s).\n";
